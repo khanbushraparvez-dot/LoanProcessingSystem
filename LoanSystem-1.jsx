@@ -298,7 +298,7 @@ function LoginPage({ onLogin }) {
             </div>
           </div>
           <h1 style={{ color: C.white, fontWeight: 900, fontSize: 38, lineHeight: 1.15, margin: "0 0 12px" }}>
-            Loan Filing<br /><span style={{ color: C.gold }}>Made Intelligent</span>
+            NOI API Integeration<br /><span style={{ color: C.gold }}>Platform</span>
           </h1>
           <p style={{ color: C.gray400, fontSize: 15, lineHeight: 1.7, maxWidth: 360, margin: "0 0 40px" }}>
             Manage every loan file — from AI document extraction to NOI filing — with a unified Case ID system.
