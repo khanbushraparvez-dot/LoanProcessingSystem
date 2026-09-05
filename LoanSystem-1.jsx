@@ -2687,16 +2687,105 @@ function UploadDocumentsPage({ session, setActiveCaseData, setPage }) {
 // ─── RECEIVED DOCUMENTS (ADMIN / EMPLOYEE ONLY) ──────────────────────────────
 function ReceivedDocumentsPage({ session, setPage, setActiveCaseData }) {
   const [items, setItems] = useState(DB.get("received_documents"));
+  const [openCaseId, setOpenCaseId] = useState(null);
   const refresh = () => setItems(DB.get("received_documents"));
-  const exportToAI = item => {
-    const sameCase = DB.get("received_documents").filter(x => x.caseId === item.caseId);
-    sessionStorage.setItem("ark_ai_imports", JSON.stringify(sameCase.map(x=>({caseId:x.caseId,fileName:x.fileName,mimeType:x.mimeType,size:x.size,dataUrl:x.dataUrl}))));
-    const c=DB.get("cases").find(x=>x.caseId===item.caseId); if(c) setActiveCaseData?.(c.storeData || {caseId:c.caseId,applicantName:c.applicantName,branch:c.branch});
-    DB.set("received_documents", DB.get("received_documents").map(x=>x.caseId===item.caseId?{...x,aiExported:true}:x));
+
+  // Group every received file belonging to the same Case ID into ONE inbox conversation.
+  const grouped = Object.values(items.reduce((acc, doc) => {
+    const key = doc.caseId || "NO-CASE-ID";
+    if (!acc[key]) acc[key] = { caseId: key, docs: [], latest: doc.uploadedAt || "", senderName: doc.senderName || "Unknown", senderRole: doc.senderRole || "", branch: doc.branch || "" };
+    acc[key].docs.push(doc);
+    if (new Date(doc.uploadedAt || 0) > new Date(acc[key].latest || 0)) {
+      acc[key].latest = doc.uploadedAt || "";
+      acc[key].senderName = doc.senderName || acc[key].senderName;
+      acc[key].senderRole = doc.senderRole || acc[key].senderRole;
+      acc[key].branch = doc.branch || acc[key].branch;
+    }
+    return acc;
+  }, {})).sort((a, b) => new Date(b.latest || 0) - new Date(a.latest || 0));
+
+  const openConversation = group => setOpenCaseId(openCaseId === group.caseId ? null : group.caseId);
+
+  const exportToAI = group => {
+    const sameCase = group.docs;
+    sessionStorage.setItem("ark_ai_imports", JSON.stringify(sameCase.map(x => ({
+      caseId: x.caseId,
+      fileName: x.fileName,
+      mimeType: x.mimeType,
+      size: x.size,
+      dataUrl: x.dataUrl
+    }))));
+    const c = DB.get("cases").find(x => x.caseId === group.caseId);
+    if (c) setActiveCaseData?.(c.storeData || { caseId: c.caseId, applicantName: c.applicantName, branch: c.branch });
+    DB.set("received_documents", DB.get("received_documents").map(x => x.caseId === group.caseId ? { ...x, aiExported: true } : x));
+    setItems(DB.get("received_documents"));
     setPage("aiDocuments");
   };
-  return <div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}><div><h2 style={{fontWeight:800,fontSize:22,color:C.dark,margin:0}}>📥 Received Documents</h2><p style={{color:C.gray500,fontSize:13,margin:"5px 0 0"}}>Inbox of documents sent by Operations / Sales Manager.</p></div><button onClick={refresh} style={{background:C.white,border:`1px solid ${C.gray300}`,borderRadius:7,padding:"9px 14px",cursor:"pointer"}}>↻ Refresh</button></div>
-    {items.length===0?<div style={{background:C.white,border:`1px solid ${C.gray200}`,borderRadius:12,padding:50,textAlign:"center",color:C.gray500}}>📭 No documents received yet.</div>:<div style={{display:"grid",gap:12}}>{items.slice().reverse().map(x=><div key={x.id} style={{background:C.white,border:`1px solid ${C.gray200}`,borderRadius:12,padding:16}}><div style={{display:"flex",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}><div><div style={{fontWeight:800,color:C.gold}}>Case {x.caseId}</div><div style={{fontSize:13,color:C.dark,marginTop:4}}>📄 {x.fileName}</div><div style={{fontSize:11,color:C.gray500,marginTop:4}}>From: {x.senderName} · {x.senderRole} · {new Date(x.uploadedAt).toLocaleString("en-IN")}</div></div><div style={{display:"flex",gap:8}}><button onClick={()=>downloadDataUrl(x.dataUrl,x.fileName)} style={{background:C.white,border:`1px solid ${C.gray300}`,borderRadius:7,padding:"8px 11px",cursor:"pointer"}}>⬇️ Download</button><button onClick={()=>exportToAI(x)} style={{background:C.gold,color:C.dark,border:"none",borderRadius:7,padding:"8px 11px",fontWeight:800,cursor:"pointer"}}>🤖 Export to AI</button></div></div></div>)}</div>}
+
+  return <div>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+      <div>
+        <h2 style={{ fontWeight: 800, fontSize: 22, color: C.dark, margin: 0 }}>📥 Received Documents</h2>
+        <p style={{ color: C.gray500, fontSize: 13, margin: "5px 0 0" }}>Inbox — each Case ID appears as one message/conversation from the sender.</p>
+      </div>
+      <button onClick={refresh} style={{ background: C.white, border: `1px solid ${C.gray300}`, borderRadius: 7, padding: "9px 14px", cursor: "pointer" }}>↻ Refresh</button>
+    </div>
+
+    {grouped.length === 0 ? (
+      <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 12, padding: 50, textAlign: "center", color: C.gray500 }}>
+        📭 No documents received yet.
+      </div>
+    ) : (
+      <div style={{ display: "grid", gap: 10 }}>
+        {grouped.map(group => {
+          const isOpen = openCaseId === group.caseId;
+          const aiDone = group.docs.every(d => d.aiExported);
+          return <div key={group.caseId} style={{ background: C.white, border: `1px solid ${isOpen ? C.gold : C.gray200}`, borderRadius: 12, overflow: "hidden", boxShadow: isOpen ? "0 4px 16px rgba(0,0,0,.06)" : "none" }}>
+            {/* Inbox message / chat header */}
+            <div onClick={() => openConversation(group)} style={{ display: "flex", alignItems: "center", gap: 14, padding: "15px 16px", cursor: "pointer" }}>
+              <div style={{ width: 44, height: 44, borderRadius: "50%", background: C.goldBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>👤</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 800, color: C.dark }}>{group.senderName}</span>
+                  <span style={{ fontSize: 11, color: C.gray500 }}>{group.senderRole}</span>
+                  <span style={{ fontSize: 11, color: C.gray500 }}>• {group.branch || "—"}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 800, color: C.gold }}>Case ID: {group.caseId}</span>
+                  <span style={{ fontSize: 12, color: C.gray500 }}>• {group.docs.length} document{group.docs.length !== 1 ? "s" : ""}</span>
+                </div>
+                <div style={{ fontSize: 11, color: C.gray500, marginTop: 3 }}>Last received: {new Date(group.latest).toLocaleString("en-IN")}</div>
+              </div>
+              <div style={{ textAlign: "right", flexShrink: 0 }}>
+                <div style={{ fontSize: 18 }}>{isOpen ? "⌃" : "⌄"}</div>
+                <div style={{ fontSize: 10, color: aiDone ? C.green : C.gray500 }}>{aiDone ? "AI exported" : "New documents"}</div>
+              </div>
+            </div>
+
+            {/* Opened conversation: ALL files for this Case ID */}
+            {isOpen && <div style={{ borderTop: `1px solid ${C.gray200}`, background: C.gray100, padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                <div style={{ fontWeight: 800, color: C.dark }}>📨 Documents received for {group.caseId}</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => exportToAI(group)} style={{ background: C.gold, color: C.dark, border: "none", borderRadius: 7, padding: "9px 13px", fontWeight: 800, cursor: "pointer" }}>🤖 Export all to AI</button>
+                </div>
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {group.docs.slice().sort((a,b) => new Date(a.uploadedAt || 0) - new Date(b.uploadedAt || 0)).map(doc => (
+                  <div key={doc.id} style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 9, padding: "11px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, color: C.dark }}>📄 {doc.fileName}</div>
+                      <div style={{ fontSize: 11, color: C.gray500, marginTop: 3 }}>{doc.mimeType || "Document"} • {new Date(doc.uploadedAt).toLocaleString("en-IN")}</div>
+                    </div>
+                    <button onClick={() => downloadDataUrl(doc.dataUrl, doc.fileName)} style={{ background: C.white, border: `1px solid ${C.gray300}`, borderRadius: 7, padding: "8px 12px", cursor: "pointer", fontWeight: 700 }}>⬇️ Download</button>
+                  </div>
+                ))}
+              </div>
+            </div>}
+          </div>;
+        })}
+      </div>
+    )}
   </div>;
 }
 
