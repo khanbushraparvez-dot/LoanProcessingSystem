@@ -48,9 +48,25 @@ const DB = {
 // Seed admin
 (async () => {
   if (!DB.get("users").length) {
-    const hash = await DB.hashPassword("Admin@123");
+    const hash = await DB.hashPassword("ASK@2026");
     DB.insert("users", { id: "admin_1", username: "admin", email: "admin@arskfil.com", passwordHash: hash, role: "Admin", branch: "HQ", active: true, createdAt: new Date().toISOString(), createdBy: "system" });
   }
+})();
+
+// Normalize users created by earlier prototype versions for the new approval flow.
+(() => {
+  try {
+    const users = DB.get("users");
+    let changed = false;
+    const normalized = users.map(u => {
+      if (u.role === "Branch Manager") { changed = true; return { ...u, role: "Sales Manager", approved: true }; }
+      if (u.role === "Admin" && u.id === "admin_1" && !u.approved) { changed = true; return { ...u, approved: true }; }
+      if (u.role !== "Admin" && u.approved === undefined) { changed = true; return { ...u, approved: !!u.active }; }
+      return u;
+    });
+    if (changed) DB.set("users", normalized);
+    if (!DB.get("access_requests").length) DB.set("access_requests", []);
+  } catch {}
 })();
 
 // ─── GLOBAL CASE STORE (persists across tab switches) ─────────────────────────
@@ -257,24 +273,80 @@ function downloadCSV(rows) {
 }
 
 // ─── AUTH PAGES ───────────────────────────────────────────────────────────────
+const AUTH_ROLES = ["Admin", "Operations", "Employee", "Sales Manager"];
+
 function LoginPage({ onLogin }) {
+  const [role, setRole] = useState("Employee");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [adminCode, setAdminCode] = useState("");
   const [showPwd, setShowPwd] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [authView, setAuthView] = useState("login");
 
   const doLogin = async () => {
-    if (!username.trim() || !password) { setError("Please enter username and password."); return; }
-    setLoading(true); setError("");
-    await new Promise(r => setTimeout(r, 500));
+    setError("");
+    if (!role) { setError("Please select your role."); return; }
+
+    if (role === "Admin") {
+      if (adminCode !== "ASK@2026") {
+        setError("Invalid Admin access code.");
+        return;
+      }
+      setLoading(true);
+      await new Promise(r => setTimeout(r, 350));
+      const admin = DB.get("users").find(u => u.role === "Admin" && u.active);
+      if (!admin) {
+        setError("Admin account is not available.");
+        setLoading(false);
+        return;
+      }
+      DB.audit("LOGIN", admin.id, { role: "Admin" });
+      DB.session = { ...admin, loginAt: new Date().toISOString() };
+      onLogin(DB.session);
+      setLoading(false);
+      return;
+    }
+
+    if (!username.trim() || !password) {
+      setError("Please enter your username/email and password.");
+      return;
+    }
+
+    setLoading(true);
+    await new Promise(r => setTimeout(r, 350));
+
     const users = DB.get("users");
-    const user = users.find(u => (u.username === username.trim() || u.email === username.trim()) && u.active);
-    if (!user) { setError("User not found or account disabled."); setLoading(false); return; }
+    const user = users.find(u =>
+      (u.username?.toLowerCase() === username.trim().toLowerCase() ||
+       u.email?.toLowerCase() === username.trim().toLowerCase()) &&
+      u.role === role &&
+      u.active &&
+      u.approved === true
+    );
+
+    if (!user) {
+      const pending = DB.get("access_requests").find(r =>
+        (r.username?.toLowerCase() === username.trim().toLowerCase() ||
+         r.email?.toLowerCase() === username.trim().toLowerCase()) &&
+        r.role === role &&
+        r.status === "Pending"
+      );
+      if (pending) setError("Your registration request is still pending Admin approval.");
+      else setError("No approved account found for this role. Please request access first.");
+      setLoading(false);
+      return;
+    }
+
     const hash = await DB.hashPassword(password);
-    if (hash !== user.passwordHash) { setError("Incorrect password."); setLoading(false); return; }
-    DB.audit("LOGIN", user.id, { username: user.username });
+    if (hash !== user.passwordHash) {
+      setError("Incorrect password.");
+      setLoading(false);
+      return;
+    }
+
+    DB.audit("LOGIN", user.id, { username: user.username, role: user.role });
     DB.session = { ...user, loginAt: new Date().toISOString() };
     onLogin(DB.session);
     setLoading(false);
@@ -285,7 +357,6 @@ function LoginPage({ onLogin }) {
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: "'Inter','Segoe UI',sans-serif" }}>
-      {/* Left panel */}
       <div style={{ flex: 1, background: `linear-gradient(135deg, ${C.dark} 0%, #0f1420 100%)`, display: "flex", flexDirection: "column", justifyContent: "center", padding: "60px 64px", position: "relative", overflow: "hidden" }}>
         <div style={{ position: "absolute", top: -80, right: -80, width: 300, height: 300, borderRadius: "50%", background: `${C.gold}10`, border: `1px solid ${C.gold}20` }} />
         <div style={{ position: "absolute", bottom: -60, left: -60, width: 220, height: 220, borderRadius: "50%", background: `${C.gold}08` }} />
@@ -298,14 +369,14 @@ function LoginPage({ onLogin }) {
             </div>
           </div>
           <h1 style={{ color: C.white, fontWeight: 900, fontSize: 38, lineHeight: 1.15, margin: "0 0 12px" }}>
-            NOI API Integeration<br /><span style={{ color: C.gold }}>Platform</span>
+            Loan Processing<br /><span style={{ color: C.gold }}>Management System</span>
           </h1>
-          <p style={{ color: C.gray400, fontSize: 15, lineHeight: 1.7, maxWidth: 360, margin: "0 0 40px" }}>
-            Manage every loan file — from AI document extraction to NOI filing — with a unified Case ID system.
+          <p style={{ color: C.gray400, fontSize: 15, lineHeight: 1.7, maxWidth: 390, margin: "0 0 40px" }}>
+            Manage loan files, challans, NOI processing, documents and MIS through one unified Case ID system.
           </p>
           <div style={{ color: C.gold, fontWeight: 700, fontSize: 16, marginBottom: 40 }}>श्री दिनेश इंटरप्राइजेज</div>
-          <div style={{ display: "flex", gap: 28 }}>
-            {[{ icon: "🤖", label: "AI Extraction" }, { icon: "🔗", label: "Case ID Linking" }, { icon: "🔒", label: "Role-Based Access" }].map(f => (
+          <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+            {[{ icon: "🔐", label: "Secure Login" }, { icon: "👥", label: "Role Based Access" }, { icon: "📁", label: "Case Management" }].map(f => (
               <div key={f.label} style={{ textAlign: "center" }}>
                 <div style={{ fontSize: 24, marginBottom: 4 }}>{f.icon}</div>
                 <div style={{ color: C.gray400, fontSize: 11, fontWeight: 600 }}>{f.label}</div>
@@ -315,12 +386,11 @@ function LoginPage({ onLogin }) {
         </div>
       </div>
 
-      {/* Right panel */}
-      <div style={{ width: 480, background: C.white, display: "flex", flexDirection: "column", justifyContent: "center", padding: "60px 52px" }}>
-        <div style={{ marginBottom: 32 }}>
+      <div style={{ width: 480, background: C.white, display: "flex", flexDirection: "column", justifyContent: "center", padding: "50px 52px" }}>
+        <div style={{ marginBottom: 24 }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: C.gold, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>EMPLOYEE PORTAL</div>
           <h2 style={{ color: C.dark, fontWeight: 900, fontSize: 28, margin: "0 0 8px" }}>Sign in</h2>
-          <p style={{ color: C.gray500, fontSize: 14, margin: 0 }}>Enter your credentials to access the dashboard.</p>
+          <p style={{ color: C.gray500, fontSize: 14, margin: 0 }}>Choose your role and enter your approved credentials.</p>
         </div>
 
         {error && (
@@ -330,44 +400,66 @@ function LoginPage({ onLogin }) {
         )}
 
         <div style={{ marginBottom: 16 }}>
-          <label style={labelStyle}>Username or Email</label>
-          <div style={{ position: "relative" }}>
-            <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>👤</span>
-            <input value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && doLogin()}
-              style={{ ...inputStyle, paddingLeft: 38 }} placeholder="username or email" />
-          </div>
+          <label style={labelStyle}>Login As</label>
+          <select value={role} onChange={e => { setRole(e.target.value); setError(""); }} style={inputStyle}>
+            {AUTH_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
         </div>
 
-        <div style={{ marginBottom: 24 }}>
-          <label style={labelStyle}>Password</label>
-          <div style={{ position: "relative" }}>
-            <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>🔒</span>
-            <input type={showPwd ? "text" : "password"} value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && doLogin()}
-              style={{ ...inputStyle, paddingLeft: 38, paddingRight: 44 }} placeholder="••••••••" />
-            <span onClick={() => setShowPwd(!showPwd)} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", cursor: "pointer", fontSize: 16 }}>
-              {showPwd ? "🙈" : "👁️"}
-            </span>
+        {role === "Admin" ? (
+          <div style={{ marginBottom: 24 }}>
+            <label style={labelStyle}>Admin Access Code</label>
+            <div style={{ position: "relative" }}>
+              <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>🔐</span>
+              <input
+                type={showPwd ? "text" : "password"}
+                value={adminCode}
+                onChange={e => setAdminCode(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && doLogin()}
+                style={{ ...inputStyle, paddingLeft: 38, paddingRight: 44 }}
+                placeholder="Enter Admin access code"
+              />
+              <span onClick={() => setShowPwd(!showPwd)} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", cursor: "pointer", fontSize: 16 }}>
+                {showPwd ? "🙈" : "👁️"}
+              </span>
+            </div>
           </div>
-        </div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 16 }}>
+              <label style={labelStyle}>Username or Email</label>
+              <div style={{ position: "relative" }}>
+                <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>👤</span>
+                <input value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && doLogin()}
+                  style={{ ...inputStyle, paddingLeft: 38 }} placeholder="username or email" />
+              </div>
+            </div>
+            <div style={{ marginBottom: 24 }}>
+              <label style={labelStyle}>Password</label>
+              <div style={{ position: "relative" }}>
+                <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 16 }}>🔒</span>
+                <input type={showPwd ? "text" : "password"} value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && doLogin()}
+                  style={{ ...inputStyle, paddingLeft: 38, paddingRight: 44 }} placeholder="••••••••" />
+                <span onClick={() => setShowPwd(!showPwd)} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", cursor: "pointer", fontSize: 16 }}>
+                  {showPwd ? "🙈" : "👁️"}
+                </span>
+              </div>
+            </div>
+          </>
+        )}
 
         <button onClick={doLogin} disabled={loading}
-          style={{ width: "100%", padding: "13px", background: loading ? C.gray300 : C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, fontSize: 16, cursor: loading ? "not-allowed" : "pointer", marginBottom: 16 }}>
+          style={{ width: "100%", padding: "13px", background: loading ? C.gray300 : C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, fontSize: 16, cursor: loading ? "not-allowed" : "pointer", marginBottom: 14 }}>
           {loading ? "⏳ Signing in…" : "Sign In →"}
         </button>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 28 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 24 }}>
           <span onClick={() => setAuthView("forgot")} style={{ color: C.gold, fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Forgot password?</span>
+          <span onClick={() => setAuthView("signup")} style={{ color: C.gold, fontSize: 13, cursor: "pointer", fontWeight: 700 }}>Request Access →</span>
         </div>
 
-        <div style={{ borderTop: `1px solid ${C.gray200}`, paddingTop: 20, textAlign: "center" }}>
-          <div style={{ color: C.gray500, fontSize: 12, marginBottom: 10 }}>Admin only</div>
-          <span onClick={() => setAuthView("signup")} style={{ color: C.gold, fontSize: 13, cursor: "pointer", fontWeight: 700, border: `1px solid ${C.gold}`, borderRadius: 6, padding: "6px 18px" }}>
-            + Create New User
-          </span>
-        </div>
-
-        <div style={{ textAlign: "center", color: C.gray400, fontSize: 11, marginTop: 28 }}>
-          Default: <strong>admin</strong> / <strong>Admin@123</strong> · © 2026 ARSKFIL
+        <div style={{ borderTop: `1px solid ${C.gray200}`, paddingTop: 16, textAlign: "center" }}>
+          <div style={{ color: C.gray500, fontSize: 11 }}>New Operations / Employee / Sales Manager accounts require Admin approval.</div>
         </div>
       </div>
     </div>
@@ -375,55 +467,136 @@ function LoginPage({ onLogin }) {
 }
 
 function SignupPage({ onBack }) {
-  const [form, setForm] = useState({ username: "", email: "", password: "", confirm: "", role: "Employee", branch: "", adminCode: "" });
+  const [form, setForm] = useState({
+    name: "", username: "", email: "", password: "", confirm: "",
+    role: "Employee", branch: "", employeeId: "", phone: ""
+  });
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
 
   const doSignup = async () => {
-    if (!form.username || !form.email || !form.password || !form.branch) { setError("All fields required."); return; }
-    if (form.password !== form.confirm) { setError("Passwords do not match."); return; }
-    if (form.password.length < 8) { setError("Password must be at least 8 characters."); return; }
-    if (form.adminCode !== "ARSK2026") { setError("Invalid admin code. Contact system administrator."); return; }
-    if (DB.get("users").find(u => u.username === form.username || u.email === form.email)) { setError("Username or email already exists."); return; }
-    setLoading(true);
+    setError("");
+    if (!form.name.trim() || !form.username.trim() || !form.email.trim() || !form.password || !form.branch.trim() || !form.employeeId.trim()) {
+      setError("Please fill all required fields.");
+      return;
+    }
+    if (!/^\S+@\S+\.\S+$/.test(form.email.trim())) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    if (form.password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    if (form.password !== form.confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    const duplicateUser = DB.get("users").find(u =>
+      u.username?.toLowerCase() === form.username.trim().toLowerCase() ||
+      u.email?.toLowerCase() === form.email.trim().toLowerCase()
+    );
+    const duplicateRequest = DB.get("access_requests").find(r =>
+      r.status === "Pending" &&
+      (r.username?.toLowerCase() === form.username.trim().toLowerCase() ||
+       r.email?.toLowerCase() === form.email.trim().toLowerCase())
+    );
+    if (duplicateUser || duplicateRequest) {
+      setError("An account or pending request already exists for this username/email.");
+      return;
+    }
+
     const hash = await DB.hashPassword(form.password);
-    const user = DB.insert("users", { id: `user_${Date.now()}`, username: form.username, email: form.email, passwordHash: hash, role: form.role, branch: form.branch, active: true, createdAt: new Date().toISOString(), createdBy: "admin" });
-    DB.audit("SIGNUP", user.id, { username: user.username, role: user.role });
-    setSuccess(`✅ User "${form.username}" created as ${form.role}.`);
-    setLoading(false);
+    const request = {
+      id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      name: form.name.trim(),
+      username: form.username.trim(),
+      email: form.email.trim(),
+      passwordHash: hash,
+      role: form.role,
+      branch: form.branch.trim(),
+      employeeId: form.employeeId.trim(),
+      phone: form.phone.trim(),
+      status: "Pending",
+      requestedAt: new Date().toISOString()
+    };
+    DB.insert("access_requests", request);
+    DB.audit("ACCESS_REQUEST", request.id, { username: request.username, role: request.role });
+    setSuccess(true);
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: C.pageBg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter','Segoe UI',sans-serif" }}>
-      <div style={{ background: C.white, borderRadius: 16, padding: 40, width: 480, boxShadow: "0 8px 32px #0002" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
+    <div style={{ minHeight: "100vh", background: C.pageBg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter','Segoe UI',sans-serif", padding: 24 }}>
+      <div style={{ background: C.white, borderRadius: 16, padding: 40, width: 560, maxWidth: "100%", boxShadow: "0 8px 32px #0002" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
           <span onClick={onBack} style={{ cursor: "pointer", color: C.gold, fontSize: 22, fontWeight: 700 }}>←</span>
           <div>
-            <h2 style={{ margin: 0, fontWeight: 900, fontSize: 22, color: C.dark }}>Create New User</h2>
-            <p style={{ margin: 0, color: C.gray500, fontSize: 13 }}>Admin code required · Admin@ARSK2026</p>
+            <h2 style={{ margin: 0, fontWeight: 900, fontSize: 22, color: C.dark }}>Request Account Access</h2>
+            <p style={{ margin: 0, color: C.gray500, fontSize: 13 }}>Your request will be reviewed by an Admin.</p>
           </div>
         </div>
+
         {error && <div style={{ background: "#fee2e2", color: C.red, padding: "10px 14px", borderRadius: 8, marginBottom: 16, fontSize: 13, fontWeight: 600 }}>⚠️ {error}</div>}
-        {success && <div style={{ background: C.greenBg, color: C.green, padding: "10px 14px", borderRadius: 8, marginBottom: 16, fontSize: 13, fontWeight: 700 }}>{success}</div>}
-        {!success ? (
+
+        {success ? (
+          <div>
+            <div style={{ background: C.greenBg, color: C.green, padding: 18, borderRadius: 10, marginBottom: 18 }}>
+              <div style={{ fontSize: 24, marginBottom: 8 }}>✅</div>
+              <div style={{ fontWeight: 800, marginBottom: 6 }}>Request submitted successfully.</div>
+              <div style={{ fontSize: 13, color: C.gray600 }}>Please wait for Admin approval. Once approved, you can log in using your selected role and credentials.</div>
+            </div>
+            <button onClick={onBack} style={{ width: "100%", padding: 13, background: C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, cursor: "pointer" }}>← Back to Login</button>
+          </div>
+        ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-            <div style={{ gridColumn: "span 2" }}><label style={labelStyle}>Username</label><input style={inputStyle} value={form.username} onChange={set("username")} placeholder="employee_name" /></div>
-            <div style={{ gridColumn: "span 2" }}><label style={labelStyle}>Email</label><input style={inputStyle} type="email" value={form.email} onChange={set("email")} placeholder="user@arskfil.com" /></div>
-            <div><label style={labelStyle}>Password</label><input style={inputStyle} type="password" value={form.password} onChange={set("password")} placeholder="Min 8 chars" /></div>
-            <div><label style={labelStyle}>Confirm Password</label><input style={inputStyle} type="password" value={form.confirm} onChange={set("confirm")} /></div>
-            <div><label style={labelStyle}>Role</label><select value={form.role} onChange={set("role")} style={inputStyle}><option>Employee</option><option>Branch Manager</option><option>Admin</option></select></div>
-            <div><label style={labelStyle}>Branch</label><input style={inputStyle} value={form.branch} onChange={set("branch")} placeholder="e.g. Thane HQ" /></div>
-            <div style={{ gridColumn: "span 2" }}><label style={labelStyle}>Admin Authorization Code</label><input style={inputStyle} type="password" value={form.adminCode} onChange={set("adminCode")} placeholder="Enter admin code" /></div>
             <div style={{ gridColumn: "span 2" }}>
-              <button onClick={doSignup} disabled={loading} style={{ width: "100%", padding: 13, background: loading ? C.gray300 : C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, fontSize: 15, cursor: loading ? "not-allowed" : "pointer" }}>
-                {loading ? "Creating…" : "Create User"}
+              <label style={labelStyle}>Full Name *</label>
+              <input style={inputStyle} value={form.name} onChange={set("name")} placeholder="Employee full name" />
+            </div>
+            <div>
+              <label style={labelStyle}>Username *</label>
+              <input style={inputStyle} value={form.username} onChange={set("username")} placeholder="employee_name" />
+            </div>
+            <div>
+              <label style={labelStyle}>Employee ID *</label>
+              <input style={inputStyle} value={form.employeeId} onChange={set("employeeId")} placeholder="EMP001" />
+            </div>
+            <div style={{ gridColumn: "span 2" }}>
+              <label style={labelStyle}>Email *</label>
+              <input style={inputStyle} type="email" value={form.email} onChange={set("email")} placeholder="user@company.com" />
+            </div>
+            <div>
+              <label style={labelStyle}>Phone</label>
+              <input style={inputStyle} value={form.phone} onChange={set("phone")} placeholder="Mobile number" />
+            </div>
+            <div>
+              <label style={labelStyle}>Branch *</label>
+              <input style={inputStyle} value={form.branch} onChange={set("branch")} placeholder="e.g. Mira Road" />
+            </div>
+            <div>
+              <label style={labelStyle}>Role *</label>
+              <select value={form.role} onChange={set("role")} style={inputStyle}>
+                <option>Operations</option>
+                <option>Employee</option>
+                <option>Sales Manager</option>
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle}>Password *</label>
+              <input style={inputStyle} type="password" value={form.password} onChange={set("password")} placeholder="Min 8 characters" />
+            </div>
+            <div>
+              <label style={labelStyle}>Confirm Password *</label>
+              <input style={inputStyle} type="password" value={form.confirm} onChange={set("confirm")} placeholder="Re-enter password" />
+            </div>
+            <div style={{ gridColumn: "span 2" }}>
+              <button onClick={doSignup} style={{ width: "100%", padding: 13, background: C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, fontSize: 15, cursor: "pointer" }}>
+                Send Access Request
               </button>
             </div>
           </div>
-        ) : (
-          <button onClick={onBack} style={{ width: "100%", padding: 13, background: C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, fontSize: 15, cursor: "pointer" }}>← Back to Login</button>
         )}
       </div>
     </div>
@@ -432,20 +605,17 @@ function SignupPage({ onBack }) {
 
 function ForgotPage({ onBack }) {
   const [email, setEmail] = useState("");
-  const [newPwd, setNewPwd] = useState("");
-  const [adminCode, setAdminCode] = useState("");
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [success, setSuccess] = useState(false);
 
-  const doReset = async () => {
-    if (adminCode !== "ARSK2026") { setError("Invalid admin authorization code."); return; }
-    const user = DB.get("users").find(u => u.email === email.trim());
-    if (!user) { setError("No account found with this email."); return; }
-    if (newPwd.length < 8) { setError("Password must be at least 8 characters."); return; }
-    const hash = await DB.hashPassword(newPwd);
-    DB.update("users", user.id, { passwordHash: hash });
-    DB.audit("PASSWORD_RESET", user.id, { email });
-    setSuccess("Password reset successfully. You can now log in.");
+  const doReset = () => {
+    setError("");
+    const user = DB.get("users").find(u => u.email?.toLowerCase() === email.trim().toLowerCase() && u.active);
+    if (!user) {
+      setError("No active account found with this email. Please contact Admin for a password reset.");
+      return;
+    }
+    setSuccess(true);
   };
 
   return (
@@ -453,20 +623,20 @@ function ForgotPage({ onBack }) {
       <div style={{ background: C.white, borderRadius: 16, padding: 40, width: 420, boxShadow: "0 8px 32px #0002" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
           <span onClick={onBack} style={{ cursor: "pointer", color: C.gold, fontSize: 22, fontWeight: 700 }}>←</span>
-          <h2 style={{ margin: 0, fontWeight: 900, fontSize: 22, color: C.dark }}>Reset Password</h2>
+          <h2 style={{ margin: 0, fontWeight: 900, fontSize: 22, color: C.dark }}>Forgot Password</h2>
         </div>
         {error && <div style={{ background: "#fee2e2", color: C.red, padding: "10px 14px", borderRadius: 8, marginBottom: 16, fontSize: 13 }}>⚠️ {error}</div>}
         {success ? (
           <div>
-            <div style={{ background: C.greenBg, color: C.green, padding: "10px 14px", borderRadius: 8, marginBottom: 16, fontSize: 13, fontWeight: 700 }}>✅ {success}</div>
+            <div style={{ background: C.goldBg, color: C.gray600, padding: 16, borderRadius: 10, marginBottom: 18, fontSize: 13 }}>
+              Please contact your Admin to reset your password. Password reset will be connected to the final user-management system later.
+            </div>
             <button onClick={onBack} style={{ width: "100%", padding: 13, background: C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, cursor: "pointer" }}>← Back to Login</button>
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div><label style={labelStyle}>Account Email</label><input style={inputStyle} value={email} onChange={e => setEmail(e.target.value)} placeholder="your@email.com" /></div>
-            <div><label style={labelStyle}>New Password</label><input style={inputStyle} type="password" value={newPwd} onChange={e => setNewPwd(e.target.value)} placeholder="Min 8 characters" /></div>
-            <div><label style={labelStyle}>Admin Authorization Code</label><input style={inputStyle} type="password" value={adminCode} onChange={e => setAdminCode(e.target.value)} placeholder="Required" /></div>
-            <button onClick={doReset} style={{ padding: 13, background: C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, cursor: "pointer" }}>Reset Password</button>
+            <button onClick={doReset} style={{ padding: 13, background: C.gold, color: C.dark, border: "none", borderRadius: 8, fontWeight: 800, cursor: "pointer" }}>Continue</button>
           </div>
         )}
       </div>
@@ -479,7 +649,7 @@ function Sidebar({ active, setPage, session, onLogout }) {
   const NAV = [{ id: "dashboard", icon: "⊞", label: "Dashboard" }, { id: "cases", icon: "📁", label: "Cases" }];
   const TOOLS = [{ id: "calculator", icon: "🖩", label: "Calculator" }, { id: "documents", icon: "🤖", label: "AI Documents" }, { id: "challan", icon: "📄", label: "Challan" }, { id: "noi", icon: "ℹ", label: "Notice of Intimation" }];
   const REPORTS = [{ id: "mis", icon: "📋", label: "MIS Report" }, { id: "payment", icon: "💳", label: "Payment Tracking" }, ...(session?.role === "Admin" ? [{ id: "admin", icon: "⚙️", label: "Admin Panel" }] : [])];
-  const roleColor = { Admin: C.red, "Branch Manager": C.gold, Employee: C.green }[session?.role] || C.gray400;
+  const roleColor = { Admin: C.red, Operations: C.sky, "Sales Manager": C.gold, Employee: C.green }[session?.role] || C.gray400;
 
   const Item = ({ item }) => (
     <div onClick={() => setPage(item.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 16px", borderRadius: 7, cursor: "pointer", marginBottom: 2, background: active === item.id ? C.sidebarActive : "transparent", color: active === item.id ? C.gold : C.gray400, fontWeight: active === item.id ? 700 : 400, fontSize: 14, transition: "all 0.15s", borderLeft: active === item.id ? `3px solid ${C.gold}` : "3px solid transparent" }}>
@@ -2223,40 +2393,136 @@ function MIS({ session, activeCaseData }) {
 // ─── ADMIN PANEL ──────────────────────────────────────────────────────────────
 function AdminPanel({ session }) {
   const [users, setUsers] = useState(DB.get("users"));
-  const [logs] = useState(DB.get("audit_logs").slice(-50).reverse());
-  const [tab, setTab] = useState("users");
-  const roleColor = { Admin: C.red, "Branch Manager": C.gold, Employee: C.green };
+  const [requests, setRequests] = useState(DB.get("access_requests").filter(r => r.status === "Pending"));
+  const [logs, setLogs] = useState(DB.get("audit_logs").slice(-50).reverse());
+  const [tab, setTab] = useState("requests");
+  const roleColor = { Admin: C.red, Operations: C.sky, "Sales Manager": C.gold, Employee: C.green };
+
+  const refresh = () => {
+    setUsers(DB.get("users"));
+    setRequests(DB.get("access_requests").filter(r => r.status === "Pending"));
+    setLogs(DB.get("audit_logs").slice(-50).reverse());
+  };
+
+  const approveRequest = async (req) => {
+    const existing = DB.get("users").find(u => u.email?.toLowerCase() === req.email.toLowerCase() || u.username?.toLowerCase() === req.username.toLowerCase());
+    if (existing) {
+      alert("A user with this username/email already exists.");
+      return;
+    }
+
+    const user = DB.insert("users", {
+      id: `user_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      username: req.username,
+      name: req.name,
+      email: req.email,
+      passwordHash: req.passwordHash,
+      role: req.role,
+      branch: req.branch,
+      employeeId: req.employeeId,
+      phone: req.phone || "",
+      active: true,
+      approved: true,
+      approvedAt: new Date().toISOString(),
+      approvedBy: session.id,
+      createdAt: req.requestedAt,
+      createdBy: session.username
+    });
+
+    DB.update("access_requests", req.id, {
+      status: "Approved",
+      reviewedAt: new Date().toISOString(),
+      reviewedBy: session.id,
+      userId: user.id
+    });
+    DB.audit("ACCESS_APPROVED", session.id, { requestId: req.id, userId: user.id, username: req.username, role: req.role });
+    refresh();
+  };
+
+  const rejectRequest = (req) => {
+    DB.update("access_requests", req.id, {
+      status: "Rejected",
+      reviewedAt: new Date().toISOString(),
+      reviewedBy: session.id
+    });
+    DB.audit("ACCESS_REJECTED", session.id, { requestId: req.id, username: req.username, role: req.role });
+    refresh();
+  };
 
   const toggleUser = (id) => {
     const u = DB.getOne("users", id);
-    if (!u) return;
+    if (!u || u.id === session.id) return;
     DB.update("users", id, { active: !u.active });
-    DB.audit("USER_TOGGLE", session.id, { targetId: id });
-    setUsers(DB.get("users"));
+    DB.audit("USER_TOGGLE", session.id, { targetId: id, active: !u.active });
+    refresh();
   };
 
   return (
     <div>
-      <h2 style={{ fontWeight: 800, fontSize: 22, color: C.dark, marginBottom: 20 }}>⚙️ Admin Panel</h2>
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-        {[["users", "👥 Users"], ["audit", "📋 Audit Logs"]].map(([t, l]) => (
-          <button key={t} onClick={() => setTab(t)} style={{ padding: "8px 20px", background: tab === t ? C.gold : C.white, color: tab === t ? C.dark : C.gray600, border: `1px solid ${tab === t ? C.gold : C.gray300}`, borderRadius: 8, fontWeight: 700, cursor: "pointer", fontSize: 14 }}>{l}</button>
+      <h2 style={{ fontWeight: 800, fontSize: 22, color: C.dark, marginBottom: 6 }}>⚙️ Admin Panel</h2>
+      <p style={{ color: C.gray500, fontSize: 13, marginTop: 0, marginBottom: 20 }}>Admin has full control over user access and system activity.</p>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+        {[
+          ["requests", `🔔 Access Requests${requests.length ? ` (${requests.length})` : ""}`],
+          ["users", "👥 Users"],
+          ["audit", "📋 Audit Logs"]
+        ].map(([t, l]) => (
+          <button key={t} onClick={() => setTab(t)} style={{ padding: "8px 18px", background: tab === t ? C.gold : C.white, color: tab === t ? C.dark : C.gray600, border: `1px solid ${tab === t ? C.gold : C.gray300}`, borderRadius: 8, fontWeight: 700, cursor: "pointer", fontSize: 14 }}>{l}</button>
         ))}
       </div>
+
+      {tab === "requests" && (
+        <div>
+          {requests.length === 0 ? (
+            <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.gray200}`, padding: "55px 30px", textAlign: "center" }}>
+              <div style={{ fontSize: 42, marginBottom: 10 }}>✅</div>
+              <div style={{ fontWeight: 800, color: C.dark, fontSize: 17 }}>No pending access requests</div>
+              <div style={{ color: C.gray500, fontSize: 13, marginTop: 6 }}>New registration requests will appear here.</div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 14 }}>
+              {requests.map(r => (
+                <div key={r.id} style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.gray200}`, padding: 20 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontWeight: 800, fontSize: 16, color: C.dark }}>{r.name} <span style={{ color: C.gray500, fontWeight: 500, fontSize: 12 }}>({r.employeeId})</span></div>
+                      <div style={{ color: C.gray600, fontSize: 13, marginTop: 4 }}>{r.email} · {r.username}</div>
+                    </div>
+                    <span style={{ background: `${roleColor[r.role] || C.gray500}22`, color: roleColor[r.role] || C.gray500, borderRadius: 12, padding: "4px 12px", fontSize: 11, fontWeight: 800 }}>{r.role}</span>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 16, background: C.gray100, borderRadius: 8, padding: 12 }}>
+                    <div><div style={{ color: C.gray500, fontSize: 10, fontWeight: 700 }}>BRANCH</div><div style={{ fontSize: 13, fontWeight: 700 }}>{r.branch}</div></div>
+                    <div><div style={{ color: C.gray500, fontSize: 10, fontWeight: 700 }}>PHONE</div><div style={{ fontSize: 13, fontWeight: 700 }}>{r.phone || "—"}</div></div>
+                    <div><div style={{ color: C.gray500, fontSize: 10, fontWeight: 700 }}>REQUESTED</div><div style={{ fontSize: 13 }}>{new Date(r.requestedAt).toLocaleString("en-IN")}</div></div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+                    <button onClick={() => approveRequest(r)} style={{ flex: 1, padding: 10, background: C.green, color: C.white, border: "none", borderRadius: 7, fontWeight: 800, cursor: "pointer" }}>✓ Approve</button>
+                    <button onClick={() => rejectRequest(r)} style={{ flex: 1, padding: 10, background: "#fee2e2", color: C.red, border: "none", borderRadius: 7, fontWeight: 800, cursor: "pointer" }}>✕ Reject</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {tab === "users" && (
         <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.gray200}`, overflow: "hidden" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead><tr style={{ background: C.gray100 }}>{["Username", "Email", "Role", "Branch", "Status", "Created", "Actions"].map(h => <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase" }}>{h}</th>)}</tr></thead>
+            <thead><tr style={{ background: C.gray100 }}>{["Name", "Username", "Email", "Role", "Branch", "Status", "Actions"].map(h => <th key={h} style={{ padding: "10px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase" }}>{h}</th>)}</tr></thead>
             <tbody>
               {users.map(u => (
                 <tr key={u.id} style={{ borderBottom: `1px solid ${C.gray100}` }}>
-                  <td style={{ padding: "12px 16px", fontWeight: 700 }}>{u.username}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: C.gray600 }}>{u.email}</td>
-                  <td style={{ padding: "12px 16px" }}><span style={{ background: `${roleColor[u.role]}22`, color: roleColor[u.role] || C.gray500, borderRadius: 12, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>{u.role}</span></td>
-                  <td style={{ padding: "12px 16px", fontSize: 13 }}>{u.branch}</td>
-                  <td style={{ padding: "12px 16px" }}><span style={{ background: u.active ? C.greenBg : "#fee2e2", color: u.active ? C.green : C.red, borderRadius: 12, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>{u.active ? "Active" : "Disabled"}</span></td>
-                  <td style={{ padding: "12px 16px", fontSize: 12, color: C.gray500 }}>{new Date(u.createdAt).toLocaleDateString("en-IN")}</td>
-                  <td style={{ padding: "12px 16px" }}>
+                  <td style={{ padding: "12px 14px", fontWeight: 700 }}>{u.name || u.username}</td>
+                  <td style={{ padding: "12px 14px", fontSize: 13 }}>{u.username}</td>
+                  <td style={{ padding: "12px 14px", fontSize: 12, color: C.gray600 }}>{u.email}</td>
+                  <td style={{ padding: "12px 14px" }}><span style={{ background: `${roleColor[u.role] || C.gray500}22`, color: roleColor[u.role] || C.gray500, borderRadius: 12, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>{u.role}</span></td>
+                  <td style={{ padding: "12px 14px", fontSize: 13 }}>{u.branch}</td>
+                  <td style={{ padding: "12px 14px" }}><span style={{ background: u.active ? C.greenBg : "#fee2e2", color: u.active ? C.green : C.red, borderRadius: 12, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>{u.active ? "Active" : "Disabled"}</span></td>
+                  <td style={{ padding: "12px 14px" }}>
                     {u.id !== session.id && (
                       <button onClick={() => toggleUser(u.id)} style={{ background: u.active ? "#fee2e2" : C.greenBg, color: u.active ? C.red : C.green, border: "none", borderRadius: 6, padding: "4px 12px", cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
                         {u.active ? "Disable" : "Enable"}
@@ -2269,6 +2535,7 @@ function AdminPanel({ session }) {
           </table>
         </div>
       )}
+
       {tab === "audit" && (
         <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.gray200}`, overflow: "hidden" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
