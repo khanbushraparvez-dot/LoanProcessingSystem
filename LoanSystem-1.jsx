@@ -771,8 +771,8 @@ function Sidebar({ active, setPage, session, onLogout }) {
   return (
     <div style={{ width: 224, minWidth: 224, background: C.sidebar, minHeight: "100vh", display: "flex", flexDirection: "column", padding: "0 0 24px 0" }}>
       <div style={{ padding: "20px 16px 14px", borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ color: C.gold, fontWeight: 800, fontSize: 18, letterSpacing: 0.5 }}>BankConnect Pro</div>
-        <div style={{ color: C.gray500, fontSize: 10, marginTop: 2 }}>ARSKFIL SERVICES LLP</div>
+        <div style={{ color: C.gold, fontWeight: 800, fontSize: 18, letterSpacing: 0.5 }}>ARSKEIL SERVICES LLP </div>
+        <div style={{ color: C.gray500, fontSize: 10, marginTop: 2 }}>powered by श्री दिनेश एंटरप्राइजेज</div>
       </div>
       <div style={{ padding: "10px 16px 12px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ width: 34, height: 34, borderRadius: "50%", background: C.gold, color: C.dark, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>{(session?.name || session?.username || "U").slice(0,1).toUpperCase()}</div>
