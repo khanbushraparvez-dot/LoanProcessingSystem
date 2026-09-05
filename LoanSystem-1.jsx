@@ -45,6 +45,100 @@ const DB = {
   session: null,
 };
 
+// ─── CASE / DOCUMENT HELPERS ────────────────────────────────────────────────
+const DOC_TYPES = {
+  SL: { label: "Sanction Letter", icon: "📜" },
+  INDEX2: { label: "Index 2", icon: "📑" },
+  ADHAR: { label: "Aadhaar", icon: "🪪" },
+  PAN: { label: "PAN", icon: "💳" },
+  NOI: { label: "NOI", icon: "ℹ️" },
+  SD: { label: "SD Receipt", icon: "🧾" },
+  SDR: { label: "SDR Receipt", icon: "🧾" },
+  RF: { label: "Registration Fee Receipt", icon: "🧾" },
+  NOI_RECEIPT: { label: "NOI Receipt", icon: "🧾" },
+};
+
+function caseDocuments(caseId) {
+  return DB.get("case_documents").filter(d => d.caseId === caseId);
+}
+
+function getVisibleCases(session) {
+  const all = DB.get("cases");
+  if (!session || session.role === "Admin" || session.role === "Employee") return session?.role === "Employee"
+    ? all.filter(c => c.employeeId === session.id || c.employeeEmail === session.email || c.createdBy === session.id)
+    : all;
+  if (session.role === "Operations") {
+    const branch = String(session.branch || "").trim().toLowerCase();
+    return all.filter(c => String(c.branch || "").trim().toLowerCase() === branch);
+  }
+  if (session.role === "Sales Manager") {
+    return all.filter(c => c.salesManagerId === session.id || c.salesManagerEmail === session.email || c.createdBy === session.id);
+  }
+  return [];
+}
+
+function syncCaseStatus(caseId) {
+  if (!caseId) return null;
+  const rec = DB.get("cases").find(c => c.caseId === caseId);
+  if (!rec) return null;
+  const docs = caseDocuments(caseId);
+  // Challan is complete when either SDR is uploaded OR both SD + RF are uploaded.
+  // This means SDR is an alternative to the SD/RF combination.
+  const hasSDR = docs.some(d => d.type === "SDR");
+  const hasSD = docs.some(d => d.type === "SD");
+  const hasRF = docs.some(d => d.type === "RF");
+  const challanReady = !!rec.challanData || hasSDR || (hasSD && hasRF);
+  const status = {
+    challanDone: challanReady,
+    sdrDone: hasSDR,
+    sdDone: hasSD,
+    rfDone: hasRF,
+    noiDone: !!rec.noiData || docs.some(d => d.type === "NOI"),
+    index2Done: docs.some(d => d.type === "INDEX2"),
+    noiReceiptDone: docs.some(d => d.type === "NOI_RECEIPT"),
+  };
+  // Final completion is based on the documents shown on the Dashboard: 
+  // Challan (SDR OR SD+RF) + Index 2 + NOI Receipt.
+  const completed = status.challanDone && status.index2Done && status.noiReceiptDone;
+  DB.update("cases", rec.id, { documentStatus: status, status: completed ? "Completed" : "Active" });
+  return status;
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function dataUrlToFile(dataUrl, name, type = "application/octet-stream") {
+  const parts = String(dataUrl || "").split(",");
+  const mime = (parts[0].match(/data:([^;]+);/) || [])[1] || type;
+  const binary = atob(parts[1] || "");
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new File([bytes], name || "document", { type: mime });
+}
+
+function downloadDataUrl(dataUrl, fileName) {
+  if (!dataUrl) return;
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = fileName || "document";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function ensureCaseDocumentStore() {
+  if (!Array.isArray(DB.get("case_documents"))) DB.set("case_documents", []);
+  if (!Array.isArray(DB.get("received_documents"))) DB.set("received_documents", []);
+  if (!Array.isArray(DB.get("ai_documents"))) DB.set("ai_documents", []);
+}
+ensureCaseDocumentStore();
+
 // Seed admin
 (async () => {
   if (!DB.get("users").length) {
@@ -66,6 +160,7 @@ const DB = {
     });
     if (changed) DB.set("users", normalized);
     if (!DB.get("access_requests").length) DB.set("access_requests", []);
+    ensureCaseDocumentStore();
   } catch {}
 })();
 
@@ -646,17 +741,33 @@ function ForgotPage({ onBack }) {
 
 // ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 function Sidebar({ active, setPage, session, onLogout }) {
-  const NAV = [{ id: "dashboard", icon: "⊞", label: "Dashboard" }, { id: "cases", icon: "📁", label: "Cases" }];
-  const TOOLS = [{ id: "calculator", icon: "🖩", label: "Calculator" }, { id: "documents", icon: "🤖", label: "AI Documents" }, { id: "challan", icon: "📄", label: "Challan" }, { id: "noi", icon: "ℹ", label: "Notice of Intimation" }];
-  const REPORTS = [{ id: "mis", icon: "📋", label: "MIS Report" }, { id: "payment", icon: "💳", label: "Payment Tracking" }, ...(session?.role === "Admin" ? [{ id: "admin", icon: "⚙️", label: "Admin Panel" }] : [])];
+  const restricted = ["Operations", "Sales Manager"].includes(session?.role);
+  const NAV = [
+    { id: "dashboard", icon: "⊞", label: "Dashboard" },
+    { id: "cases", icon: "📁", label: "Cases" },
+  ];
+  const TOOLS = [
+    { id: "calculator", icon: "🖩", label: "Calculator" },
+    { id: "uploadDocuments", icon: "⬆️", label: "Upload Documents" },
+    { id: "allDocuments", icon: "📂", label: "All Documents" },
+    ...(!restricted ? [
+      { id: "receivedDocuments", icon: "📥", label: "Received Documents" },
+      { id: "aiDocuments", icon: "🤖", label: "AI Documents" },
+      { id: "challan", icon: "📄", label: "Challan" },
+      { id: "noi", icon: "ℹ️", label: "Notice of Intimation" },
+    ] : []),
+  ];
+  const REPORTS = [
+    { id: "mis", icon: "📋", label: "MIS Report" },
+    { id: "payment", icon: "💳", label: "Payment Tracking" },
+    ...(session?.role === "Admin" ? [{ id: "admin", icon: "⚙️", label: "Admin Panel" }] : [])
+  ];
   const roleColor = { Admin: C.red, Operations: C.sky, "Sales Manager": C.gold, Employee: C.green }[session?.role] || C.gray400;
-
   const Item = ({ item }) => (
     <div onClick={() => setPage(item.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 16px", borderRadius: 7, cursor: "pointer", marginBottom: 2, background: active === item.id ? C.sidebarActive : "transparent", color: active === item.id ? C.gold : C.gray400, fontWeight: active === item.id ? 700 : 400, fontSize: 14, transition: "all 0.15s", borderLeft: active === item.id ? `3px solid ${C.gold}` : "3px solid transparent" }}>
       <span style={{ fontSize: 16 }}>{item.icon}</span>{item.label}
     </div>
   );
-
   return (
     <div style={{ width: 224, minWidth: 224, background: C.sidebar, minHeight: "100vh", display: "flex", flexDirection: "column", padding: "0 0 24px 0" }}>
       <div style={{ padding: "20px 16px 14px", borderBottom: `1px solid ${C.border}` }}>
@@ -664,25 +775,19 @@ function Sidebar({ active, setPage, session, onLogout }) {
         <div style={{ color: C.gray500, fontSize: 10, marginTop: 2 }}>ARSKFIL SERVICES LLP</div>
       </div>
       <div style={{ padding: "10px 16px 12px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ width: 34, height: 34, borderRadius: "50%", background: C.gold, color: C.dark, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>
-          {session?.username?.[0]?.toUpperCase() || "?"}
-        </div>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ color: C.white, fontWeight: 700, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session?.username}</div>
-          <div style={{ color: roleColor, fontSize: 11, fontWeight: 600 }}>{session?.role}</div>
-        </div>
+        <div style={{ width: 34, height: 34, borderRadius: "50%", background: C.gold, color: C.dark, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>{(session?.name || session?.username || "U").slice(0,1).toUpperCase()}</div>
+        <div style={{ minWidth: 0 }}><div style={{ color: C.white, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{session?.name || session?.username}</div><div style={{ color: roleColor, fontSize: 10, fontWeight: 700 }}>{session?.role}</div></div>
       </div>
-      <div style={{ padding: "12px 8px 0", flex: 1, overflowY: "auto" }}>
+      <div style={{ padding: "12px 10px", flex: 1 }}>
+        <div style={{ color: C.gray600, fontSize: 10, fontWeight: 800, padding: "4px 16px 7px", letterSpacing: 1 }}>MAIN</div>
         {NAV.map(i => <Item key={i.id} item={i} />)}
-        <div style={{ color: C.gray500, fontSize: 11, fontWeight: 600, padding: "12px 8px 4px", letterSpacing: 1, textTransform: "uppercase" }}>Tools</div>
+        <div style={{ color: C.gray600, fontSize: 10, fontWeight: 800, padding: "14px 16px 7px", letterSpacing: 1 }}>TOOLS</div>
         {TOOLS.map(i => <Item key={i.id} item={i} />)}
-        <div style={{ color: C.gray500, fontSize: 11, fontWeight: 600, padding: "12px 8px 4px", letterSpacing: 1, textTransform: "uppercase" }}>Reports</div>
+        <div style={{ color: C.gray600, fontSize: 10, fontWeight: 800, padding: "14px 16px 7px", letterSpacing: 1 }}>REPORTS</div>
         {REPORTS.map(i => <Item key={i.id} item={i} />)}
       </div>
-      <div style={{ padding: "12px 8px 0" }}>
-        <div onClick={onLogout} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 16px", borderRadius: 7, cursor: "pointer", background: "#ef444422", color: C.red, fontWeight: 600, fontSize: 14 }}>
-          <span>⎋</span> Log out
-        </div>
+      <div style={{ padding: "10px 10px 0", borderTop: `1px solid ${C.border}` }}>
+        <div onClick={onLogout} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 16px", borderRadius: 7, cursor: "pointer", color: C.gray400, fontSize: 14 }}>↪ <span>Logout</span></div>
       </div>
     </div>
   );
@@ -744,122 +849,61 @@ function CaseSearchBar({ onSelect, placeholder }) {
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({ setPage, session }) {
-  const cases = DB.get("cases");
-  const completed = cases.filter(c => c.status === "Completed").length;
-  const pending = cases.filter(c => c.status !== "Completed").length;
-  const recent = [...cases].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 8);
-
+  const [query, setQuery] = useState("");
+  const [tick, setTick] = useState(0);
+  useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 1000); return () => clearInterval(id); }, []);
+  const cases = getVisibleCases(session);
+  // Always calculate the latest document status so Dashboard updates immediately
+  // after SDR/SD/RF/Index 2/NOI Receipt uploads.
+  const statusMap = {};
+  cases.forEach(c => { statusMap[c.caseId] = syncCaseStatus(c.caseId) || c.documentStatus || {}; });
+  const statusOf = c => statusMap[c.caseId] || {};
+  const q = query.trim().toLowerCase();
+  const filteredCases = cases.filter(c => !q || String(c.caseId || "").toLowerCase().includes(q) || String(c.applicantName || "").toLowerCase().includes(q));
+  const completed = cases.filter(c => { const st = statusOf(c); return st.challanDone && st.index2Done && st.noiReceiptDone; }).length;
+  const pending = cases.length - completed;
+  const downloadFor = (caseId, type) => {
+    const doc = caseDocuments(caseId).find(d => d.type === type);
+    if (doc?.dataUrl) downloadDataUrl(doc.dataUrl, doc.fileName);
+  };
+  const downloadChallan = c => {
+    const docs = caseDocuments(c.caseId).filter(d => ["SDR","SD","RF"].includes(d.type));
+    if (docs.length) { const doc = docs[0]; downloadDataUrl(doc.dataUrl, doc.fileName); return; }
+    if (c.challanData) {
+      const text = [`Case ID: ${c.caseId}`, `Applicant: ${c.applicantName || ""}`, `Bank: ${c.bankName || ""}`, `Loan Amount: ${c.loanAmount || ""}`, `Challan Status: ${statusOf(c).challanDone ? "DONE" : "PENDING"}`, `Generated: ${c.challanData.createdAt || c.createdAt || ""}`].join("\n");
+      const blob = new Blob([text], { type: "text/plain" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${c.caseId}-Challan.txt`; a.click(); URL.revokeObjectURL(a.href);
+    }
+  };
   const statCard = (label, value, icon, color) => (
-    <div style={{ flex: 1, background: C.white, borderRadius: 10, padding: "20px 24px", border: `1px solid ${C.gray200}`, borderTop: `3px solid ${color}` }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <div>
-          <div style={{ color: C.gray500, fontSize: 13, fontWeight: 500, marginBottom: 6 }}>{label}</div>
-          <div style={{ color: C.dark, fontSize: 28, fontWeight: 800 }}>{value || "—"}</div>
-        </div>
-        <span style={{ fontSize: 22, color }}>{icon}</span>
-      </div>
-    </div>
+    <div style={{ flex: 1, background: C.white, borderRadius: 10, padding: "20px 24px", border: `1px solid ${C.gray200}`, borderTop: `3px solid ${color}` }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}><div><div style={{ color: C.gray500, fontSize: 13, fontWeight: 500, marginBottom: 6 }}>{label}</div><div style={{ color: C.dark, fontSize: 28, fontWeight: 800 }}>{value}</div></div><span style={{ fontSize: 22 }}>{icon}</span></div></div>
   );
-
+  const challanLabel = st => st.sdrDone ? "SDR" : (st.sdDone && st.rfDone ? "SD + RF" : st.challanDone ? "Done" : "Pending");
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 28 }}>
-        <div>
-          <h2 style={{ fontWeight: 800, fontSize: 22, color: C.dark, margin: "0 0 4px" }}>Dashboard</h2>
-          <div style={{ color: C.gray500, fontSize: 13 }}>Welcome, <strong>{session?.username}</strong> · {new Date().toLocaleDateString("en-IN", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</div>
-        </div>
-        <button onClick={() => setPage("documents")} style={{ background: C.gold, color: C.dark, border: "none", borderRadius: 8, padding: "10px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>+ New Case</button>
-      </div>
-
-      <div style={{ display: "flex", gap: 16, marginBottom: 28 }}>
-        {statCard("Total Cases", cases.length, "📈", C.gold)}
-        {statCard("Completed", completed, "✅", C.green)}
-        {statCard("Pending / Active", pending, "⏰", C.amber)}
-      </div>
-
-      <div style={{ background: C.white, borderRadius: 10, border: `1px solid ${C.gray200}`, overflow: "hidden" }}>
-        <div style={{ padding: "16px 24px", borderBottom: `1px solid ${C.gray200}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ margin: 0, fontWeight: 700, fontSize: 16, color: C.dark }}>Recent Cases</h3>
-          <span onClick={() => setPage("cases")} style={{ color: C.gold, fontSize: 13, cursor: "pointer", fontWeight: 600 }}>View All →</span>
-        </div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ background: C.gray100 }}>
-              {["Case ID", "Applicant Name", "Bank", "Loan Amount", "Status", "Date"].map(h => (
-                <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: C.gray500, letterSpacing: 0.5, textTransform: "uppercase" }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {recent.length === 0
-              ? <tr><td colSpan={6} style={{ padding: "40px 20px", textAlign: "center", color: C.gray400, fontSize: 14 }}>No cases yet. Click <strong>+ New Case</strong> to generate the first Case ID.</td></tr>
-              : recent.map(c => (
-                <tr key={c.id} style={{ borderBottom: `1px solid ${C.gray100}` }}>
-                  <td style={{ padding: "12px 16px" }}><span style={{ color: C.gold, fontWeight: 800, fontSize: 13 }}>{c.caseId}</span></td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, fontWeight: 600 }}>{c.applicantName || "—"}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: C.gray600 }}>{c.bankName || "—"}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13 }}>₹{Number(c.loanAmount || 0).toLocaleString("en-IN")}</td>
-                  <td style={{ padding: "12px 16px" }}>
-                    <span style={{ background: c.status === "Completed" ? C.greenBg : c.status === "NOI Filed" ? C.indigoBg : C.goldBg, color: c.status === "Completed" ? C.green : c.status === "NOI Filed" ? C.indigo : C.gold, borderRadius: 12, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
-                      {c.status || "Active"}
-                    </span>
-                  </td>
-                  <td style={{ padding: "12px 16px", fontSize: 12, color: C.gray500 }}>{new Date(c.createdAt).toLocaleDateString("en-IN")}</td>
-                </tr>
-              ))}
-          </tbody>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, gap: 14, flexWrap: "wrap" }}><div><h2 style={{ fontWeight: 800, fontSize: 22, color: C.dark, margin: "0 0 4px" }}>Dashboard</h2><div style={{ color: C.gray500, fontSize: 13 }}>Welcome, <strong>{session?.username}</strong> · {new Date().toLocaleDateString("en-IN", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</div></div><button onClick={() => setPage("uploadDocuments")} style={{ background: C.gold, color: C.dark, border: "none", borderRadius: 8, padding: "10px 20px", fontWeight: 700, cursor: "pointer" }}>+ Upload Documents</button></div>
+      <div style={{ display: "flex", gap: 16, marginBottom: 22 }}>{statCard("Total Cases", cases.length, "📈", C.gold)}{statCard("Completed", completed, "✅", C.green)}{statCard("Pending / Active", pending, "⏰", C.amber)}</div>
+      <div style={{ background: C.white, borderRadius: 10, border: `1px solid ${C.gray200}`, overflow: "auto" }}>
+        <div style={{ padding: "16px 24px", borderBottom: `1px solid ${C.gray200}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}><h3 style={{ margin: 0, fontWeight: 700, fontSize: 16, color: C.dark }}>Cases</h3><div style={{ display: "flex", gap: 10, alignItems: "center" }}><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search Case ID / Applicant Name" style={{ ...inputStyle, width: 260 }} /><span onClick={() => setPage("cases")} style={{ color: C.gold, fontSize: 13, cursor: "pointer", fontWeight: 600 }}>View All →</span></div></div>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1100 }}><thead><tr style={{ background: C.gray100 }}>{["Case ID","Applicant Name","Challan (SDR / SD / RF)","Index 2","NOI Receipt","Status","Downloads"].map((h,i)=><th key={i} style={{ padding: "10px 14px", textAlign: "left", fontSize: 11, color: C.gray500, textTransform: "uppercase" }}>{h}</th>)}</tr></thead>
+          <tbody>{filteredCases.length === 0 ? <tr><td colSpan={7} style={{ padding: 40, textAlign: "center", color: C.gray400 }}>{cases.length ? "No matching cases found." : "No cases found for your role."}</td></tr> : filteredCases.slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).map(c=>{const st=statusOf(c); return <tr key={c.id} style={{ borderBottom: `1px solid ${C.gray100}` }}><td style={{ padding: "12px 14px", color: C.gold, fontWeight: 800 }}>{c.caseId}</td><td style={{ padding: "12px 14px", fontWeight: 600 }}>{c.applicantName || "—"}</td><td style={{ padding: "12px 14px" }}><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{[["SDR",st.sdrDone],["SD",st.sdDone],["RF",st.rfDone]].map(([type,done])=><button key={type} disabled={!done} onClick={()=>downloadFor(c.caseId,type)} title={done?`Download ${type}`:`${type} not uploaded`} style={{border:`1px solid ${done?C.green:C.gray300}`,background:done?C.greenBg:C.white,color:done?C.green:C.gray500,borderRadius:6,padding:"5px 8px",fontWeight:800,cursor:done?"pointer":"not-allowed",opacity:done?1:.55}}>{type} ⬇️</button>)}</div></td><td style={{ padding: "12px 14px" }}>{st.index2Done ? <span style={{fontWeight:800,color:C.green}}>✅ Done</span> : <span style={{color:C.gray500}}>⏳ Pending</span>}</td><td style={{ padding: "12px 14px" }}>{st.noiReceiptDone ? <span style={{fontWeight:800,color:C.green}}>✅ Done</span> : <span style={{color:C.gray500}}>⏳ Pending</span>}</td><td style={{ padding: "12px 14px" }}>{st.challanDone && st.index2Done && st.noiReceiptDone ? <span style={{background:C.greenBg,color:C.green,padding:"5px 9px",borderRadius:6,fontWeight:800}}>Completed</span> : <span style={{background:"#fff7ed",color:C.amber,padding:"5px 9px",borderRadius:6,fontWeight:800}}>Pending</span>}</td><td style={{ padding: "12px 14px" }}><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button disabled={!st.index2Done} onClick={()=>downloadFor(c.caseId,"INDEX2")} style={{border:`1px solid ${C.gray300}`,background:C.white,borderRadius:6,padding:"6px 8px",cursor:st.index2Done?"pointer":"not-allowed",opacity:st.index2Done?1:.45}}>⬇️ Index 2</button><button disabled={!st.noiReceiptDone} onClick={()=>downloadFor(c.caseId,"NOI_RECEIPT")} style={{border:`1px solid ${C.gray300}`,background:C.white,borderRadius:6,padding:"6px 8px",cursor:st.noiReceiptDone?"pointer":"not-allowed",opacity:st.noiReceiptDone?1:.45}}>⬇️ NOI Receipt</button></div></td></tr>})}</tbody>
         </table>
       </div>
     </div>
   );
 }
-
 // ─── CASES PAGE ───────────────────────────────────────────────────────────────
-function Cases({ setPage }) {
-  const [cases] = useState(DB.get("cases"));
+function Cases({ setPage, session, setActiveCaseData }) {
   const [search, setSearch] = useState("");
+  const cases = getVisibleCases(session);
   const filtered = cases.filter(c => !search || c.caseId?.toLowerCase().includes(search.toLowerCase()) || c.applicantName?.toLowerCase().includes(search.toLowerCase()));
-
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h2 style={{ fontWeight: 800, fontSize: 22, color: C.dark, margin: 0 }}>All Cases</h2>
-        <button onClick={() => setPage("documents")} style={{ background: C.gold, color: C.dark, border: "none", borderRadius: 8, padding: "10px 20px", fontWeight: 700, cursor: "pointer" }}>+ New Case</button>
-      </div>
-      <div style={{ marginBottom: 16 }}>
-        <CaseSearchBar onSelect={(c) => setSearch(c.caseId)} />
-      </div>
-      <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.gray200}`, overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ background: C.gray100 }}>
-              {["Case ID", "Applicant", "Loan File No.", "Bank", "Amount", "Status", "Created"].map(h => (
-                <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0
-              ? <tr><td colSpan={7} style={{ padding: "40px", textAlign: "center", color: C.gray400 }}>No cases found.</td></tr>
-              : filtered.map(c => (
-                <tr key={c.id} style={{ borderBottom: `1px solid ${C.gray100}` }}>
-                  <td style={{ padding: "12px 16px" }}><span style={{ color: C.gold, fontWeight: 800 }}>{c.caseId}</span></td>
-                  <td style={{ padding: "12px 16px", fontWeight: 600, fontSize: 13 }}>{c.applicantName || "—"}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: C.gray600 }}>{c.loanFileNumber || "—"}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: C.gray600 }}>{c.bankName || "—"}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13 }}>₹{Number(c.loanAmount || 0).toLocaleString("en-IN")}</td>
-                  <td style={{ padding: "12px 16px" }}>
-                    <span style={{ background: c.status === "Completed" ? C.greenBg : C.goldBg, color: c.status === "Completed" ? C.green : C.gold, borderRadius: 12, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>{c.status || "Active"}</span>
-                  </td>
-                  <td style={{ padding: "12px 16px", fontSize: 12, color: C.gray500 }}>{new Date(c.createdAt).toLocaleDateString("en-IN")}</td>
-                </tr>
-              ))}
-          </tbody>
-        </table>
-      </div>
+    <div><div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}><h2 style={{ fontWeight:800, fontSize:22, color:C.dark, margin:0 }}>Cases</h2><button onClick={()=>setPage("uploadDocuments")} style={{ background:C.gold,color:C.dark,border:"none",borderRadius:8,padding:"10px 20px",fontWeight:700,cursor:"pointer" }}>+ New Case</button></div>
+      <div style={{ marginBottom:16 }}><input style={inputStyle} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search Case ID or Applicant Name..." /></div>
+      <div style={{ background:C.white,borderRadius:12,border:`1px solid ${C.gray200}`,overflow:"auto" }}><table style={{ width:"100%",borderCollapse:"collapse",minWidth:900 }}><thead><tr style={{ background:C.gray100 }}>{["Case ID","Applicant","Bank","Amount","Status","Created"].map(h=><th key={h} style={{ padding:"10px 16px",textAlign:"left",fontSize:11,color:C.gray500,textTransform:"uppercase" }}>{h}</th>)}</tr></thead><tbody>{filtered.length===0?<tr><td colSpan={6} style={{padding:40,textAlign:"center",color:C.gray400}}>No cases found.</td></tr>:filtered.map(c=><tr key={c.id} onClick={()=>{setActiveCaseData?.(c.storeData || {caseId:c.caseId, applicantName:c.applicantName, bankName:c.bankName, loanAmount:c.loanAmount, branchName:c.branch});}} style={{borderBottom:`1px solid ${C.gray100}`,cursor:"pointer"}}><td style={{padding:"12px 16px",color:C.gold,fontWeight:800}}>{c.caseId}</td><td style={{padding:"12px 16px",fontWeight:600}}>{c.applicantName||"—"}</td><td style={{padding:"12px 16px"}}>{c.bankName||"—"}</td><td style={{padding:"12px 16px"}}>₹{Number(c.loanAmount||0).toLocaleString("en-IN")}</td><td style={{padding:"12px 16px"}}>{c.status||"Active"}</td><td style={{padding:"12px 16px",fontSize:12,color:C.gray500}}>{c.createdAt?new Date(c.createdAt).toLocaleDateString("en-IN"):"—"}</td></tr>)}</tbody></table></div>
     </div>
   );
 }
+
 
 // ─── CALCULATOR ───────────────────────────────────────────────────────────────
 function Calculator() {
@@ -1053,28 +1097,26 @@ function Challan({ session, activeCaseData, mergeActiveCaseData, setActiveCaseDa
       alert("Fill Mortgagor Name, Loan Amount, and Bank Name before generating."); return;
     }
     setSaving(true);
-    const caseId = DB.generateCaseId();
-    const challanData = { ...form, stamp, reg, total: stamp + reg, caseId };
-    const rec = {
-      id: `case_${Date.now()}`, caseId,
-      loanFileNumber: form.loanFileNumber,
-      applicantName: form.mortgagorName1,
-      coApplicants: form.mortgagorName2 ? [form.mortgagorName2] : [],
-      bankName: form.bankName,
-      loanAmount: form.loanAmount,
-      branch: session?.branch || "",
-      createdAt: new Date().toISOString(),
-      createdBy: session?.id,
-      status: "Active",
-      challanData,
-      aiData: activeCaseData || null,
-      storeData: { ...(activeCaseData || {}), caseId, challanData },
-      noiData: null,
-    };
-    DB.insert("cases", rec);
-    DB.audit("CASE_CREATED", session?.id, { caseId, applicant: form.mortgagorName1 });
-
-    // Update activeCaseData with caseId and challan data
+    const existingRec = activeCaseData?.caseId ? DB.get("cases").find(c => c.caseId === activeCaseData.caseId) : null;
+    const caseId = existingRec?.caseId || DB.generateCaseId();
+    const challanData = { ...form, stamp, reg, total: stamp + reg, caseId, createdAt: new Date().toISOString() };
+    if (existingRec) {
+      DB.update("cases", existingRec.id, {
+        loanFileNumber: form.loanFileNumber || existingRec.loanFileNumber,
+        applicantName: form.mortgagorName1 || existingRec.applicantName,
+        bankName: form.bankName || existingRec.bankName,
+        loanAmount: form.loanAmount || existingRec.loanAmount,
+        branch: existingRec.branch || session?.branch || "",
+        createdBy: existingRec.createdBy || session?.id,
+        challanData,
+        aiData: existingRec.aiData || activeCaseData || null,
+        storeData: { ...(existingRec.storeData || {}), ...(activeCaseData || {}), ...form, caseId, challanData },
+      });
+    } else {
+      DB.insert("cases", { id:`case_${Date.now()}`, caseId, loanFileNumber:form.loanFileNumber, applicantName:form.mortgagorName1, coApplicants:form.mortgagorName2?[form.mortgagorName2]:[], bankName:form.bankName, loanAmount:form.loanAmount, branch:session?.branch||"", createdAt:new Date().toISOString(), createdBy:session?.id, status:"Active", challanData, aiData:activeCaseData||null, storeData:{...(activeCaseData||{}),caseId,challanData}, noiData:null });
+      DB.audit("CASE_CREATED", session?.id, { caseId, applicant: form.mortgagorName1 });
+    }
+    syncCaseStatus(caseId);
     if (setActiveCaseData) setActiveCaseData({ ...(activeCaseData || {}), caseId, challanData, ...form });
     if (mergeActiveCaseData) mergeActiveCaseData({ caseId, challanData });
 
@@ -1745,6 +1787,22 @@ function DocumentUpload({ session, activeCaseData, mergeActiveCaseData, setPage 
   const [editingOwner, setEditingOwner] = useState(null);
   const [slData, setSlData] = useState(null);
   const [linkedCase, setLinkedCase] = useState(null);
+  const [aiTab, setAiTab] = useState("ALL");
+
+  useEffect(() => {
+    const raw = sessionStorage.getItem("ark_ai_imports");
+    if (!raw) return;
+    try {
+      const imports = JSON.parse(raw);
+      const imported = imports.map(x => ({ ...x, file: dataUrlToFile(x.dataUrl, x.fileName, x.mimeType), name:x.fileName, size:x.size||0, id:`imp_${Date.now()}_${Math.random()}`, status:"pending" }));
+      setFiles(prev => [...prev, ...imported.filter(x => !prev.some(p => p.name === x.name && p.size === x.size))]);
+      if (imports[0]?.caseId) {
+        const c = DB.get("cases").find(x => x.caseId === imports[0].caseId);
+        if (c) setLinkedCase(c);
+      }
+      sessionStorage.removeItem("ark_ai_imports");
+    } catch {}
+  }, []);
 
   const addFiles = (list) => {
     const newF = Array.from(list).filter(f => !files.find(u => u.name === f.name && u.size === f.size));
@@ -1973,7 +2031,9 @@ function DocumentUpload({ session, activeCaseData, mergeActiveCaseData, setPage 
 
     // Persist to linked DB case (single source of truth)
     if (linkedCase) {
-      DB.update("cases", linkedCase.id, { aiData: extracted, storeData: { ...extracted, caseId: linkedCase.caseId } });
+      DB.update("cases", linkedCase.id, { aiData: extracted, applicantName: extracted.applicantName || linkedCase.applicantName, bankName: extracted.bankName || linkedCase.bankName, loanAmount: extracted.loanAmount || linkedCase.loanAmount, branch: linkedCase.branch || extracted.branchName || session?.branch || "", storeData: { ...(linkedCase.storeData || {}), ...extracted, caseId: linkedCase.caseId } });
+      results.forEach(r => { const src = files.find(f => f.id === r.fileId); DB.insert("ai_documents", { id:`aid_${Date.now()}_${Math.random()}`, caseId:linkedCase.caseId, documentType:r.documentType, fileName:r.fileName, extractedAt:new Date().toISOString(), extractedData:r }); });
+      syncCaseStatus(linkedCase.caseId);
       DB.audit("AI_DATA_SAVED", session?.id, { caseId: linkedCase.caseId, sls: slResults.length, totalLoan });
     }
 
@@ -2223,7 +2283,7 @@ function DocumentUpload({ session, activeCaseData, mergeActiveCaseData, setPage 
   return (
     <div>
       <h2 style={{ fontWeight: 800, fontSize: 22, color: C.dark, margin: "0 0 4px" }}>🤖 AI Document Intelligence</h2>
-      <p style={{ color: C.gray500, fontSize: 14, margin: "0 0 20px" }}>Upload documents in any order. AI auto-detects type, extracts data, matches owners, validates names.</p>
+      <p style={{ color: C.gray500, fontSize: 14, margin: "0 0 20px" }}>Process documents against one Case ID. Tabs: SL, INDEX2, ADHAR and PAN. Data is saved under the linked Case ID.</p>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
         {[["📜", "Sanction Letter"], ["📑", "Index II"], ["🪪", "Aadhaar Card"], ["💳", "PAN Card"]].map(([i, l]) => (
           <div key={l} style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 8, padding: "8px 14px", display: "flex", gap: 8, alignItems: "center" }}>
@@ -2231,6 +2291,10 @@ function DocumentUpload({ session, activeCaseData, mergeActiveCaseData, setPage 
           </div>
         ))}
       </div>
+      <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap" }}>
+        {[['ALL','All'],['SanctionLetter','SL'],['IndexII','INDEX2'],['Aadhaar','ADHAR'],['PAN','PAN']].map(([id,label]) => <button key={id} onClick={()=>setAiTab(id)} style={{ border:`1px solid ${aiTab===id?C.gold:C.gray300}`, background:aiTab===id?C.goldBg:C.white, color:aiTab===id?C.gold:C.gray600, borderRadius:7, padding:"7px 13px", fontWeight:700, cursor:"pointer" }}>{label}</button>)}
+      </div>
+      {files.length > 0 && <div style={{ background:C.white, border:`1px solid ${C.gray200}`, borderRadius:10, padding:12, marginBottom:14 }}>{files.filter(f=>aiTab==="ALL" || f.docType===aiTab).map(f=><div key={f.id} style={{ display:"flex", justifyContent:"space-between", padding:"8px 4px", borderBottom:`1px solid ${C.gray100}`, fontSize:13 }}><span>{f.name}</span><span style={{ color:f.status==="done"?C.green:f.status==="error"?C.red:C.amber, fontWeight:700 }}>{f.status}</span></div>)}</div>}
       <label onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)}
         onDrop={e => { e.preventDefault(); setDragOver(false); addFiles(e.dataTransfer.files); }}
         style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", border: `2px dashed ${dragOver ? C.gold : C.gray300}`, borderRadius: 12, padding: "40px 20px", cursor: "pointer", background: dragOver ? C.goldBg : C.white, transition: "all 0.2s", marginBottom: 20 }}>
@@ -2562,6 +2626,105 @@ function AdminPanel({ session }) {
   );
 }
 
+
+// ─── UPLOAD DOCUMENTS (BANKER / OPERATIONS / SALES INBOX) ────────────────────
+function UploadDocumentsPage({ session, setActiveCaseData, setPage }) {
+  const [files, setFiles] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [success, setSuccess] = useState(null);
+  const [applicantName, setApplicantName] = useState("");
+  const [branch, setBranch] = useState(session?.branch || "");
+  const [loanFileNumber, setLoanFileNumber] = useState("");
+
+  const addFiles = list => setFiles(prev => [...prev, ...Array.from(list).filter(f => !prev.some(x => x.name===f.name && x.size===f.size))]);
+  const submit = async () => {
+    if (!files.length) { alert("Please upload at least one document."); return; }
+    setSubmitting(true);
+    try {
+      const caseId = DB.generateCaseId();
+      const now = new Date().toISOString();
+      const caseRec = {
+        id:`case_${Date.now()}_${Math.random()}`, caseId, applicantName: applicantName.trim(), loanFileNumber: loanFileNumber.trim(),
+        bankName:"", loanAmount:"", branch:branch.trim(), createdAt:now, createdBy:session?.id, createdByName:session?.name || session?.username,
+        createdByRole:session?.role, salesManagerId:session?.role === "Sales Manager" ? session.id : null, salesManagerEmail:session?.role === "Sales Manager" ? session.email : null,
+        employeeId:session?.role === "Employee" ? session.id : null, employeeEmail:session?.role === "Employee" ? session.email : null,
+        status:"Active", challanData:null, noiData:null, aiData:null, storeData:{caseId, applicantName:applicantName.trim(), loanFileNumber:loanFileNumber.trim(), branch:branch.trim()}
+      };
+      DB.insert("cases", caseRec);
+      const saved=[];
+      for (const file of files) {
+        const dataUrl=await fileToDataUrl(file);
+        const rec={ id:`rd_${Date.now()}_${Math.random()}`, caseId, fileName:file.name, mimeType:file.type || "application/octet-stream", size:file.size, dataUrl,
+          senderId:session?.id, senderName:session?.name || session?.username, senderRole:session?.role, branch:branch.trim(), uploadedAt:now, status:"Received", aiExported:false };
+        DB.insert("received_documents",rec); saved.push(rec);
+      }
+      DB.audit("DOCUMENTS_RECEIVED", session?.id, {caseId, count:saved.length});
+      setActiveCaseData?.({caseId, applicantName:applicantName.trim(), loanFileNumber:loanFileNumber.trim(), branch:branch.trim()});
+      setSuccess(caseId); setFiles([]); setApplicantName(""); setLoanFileNumber("");
+    } catch (e) { alert("Could not submit documents: " + e.message); }
+    setSubmitting(false);
+  };
+  return <div>
+    <h2 style={{fontWeight:800,fontSize:22,color:C.dark,margin:"0 0 5px"}}>⬆️ Upload Documents</h2>
+    <p style={{color:C.gray500,fontSize:14,margin:"0 0 20px"}}>Upload multiple Sanction Letters, Aadhaar cards, PAN cards and Index 2 files. Submit once to create one Case ID.</p>
+    {success && <div style={{background:C.greenBg,border:`1px solid ${C.green}`,borderRadius:10,padding:16,marginBottom:18}}><div style={{fontWeight:800,color:C.green}}>✅ Documents submitted successfully</div><div style={{fontSize:14,marginTop:5}}>Case ID: <strong>{success}</strong></div><button onClick={()=>setPage("cases")} style={{marginTop:10,background:C.green,color:C.white,border:"none",borderRadius:7,padding:"8px 14px",fontWeight:700,cursor:"pointer"}}>View Case</button></div>}
+    <div style={{background:C.white,border:`1px solid ${C.gray200}`,borderRadius:12,padding:22}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:18}}>
+        <div><label style={labelStyle}>Applicant Name</label><input style={inputStyle} value={applicantName} onChange={e=>setApplicantName(e.target.value)} placeholder="Optional — AI can fill later"/></div>
+        <div><label style={labelStyle}>Loan File Number</label><input style={inputStyle} value={loanFileNumber} onChange={e=>setLoanFileNumber(e.target.value)} placeholder="Optional"/></div>
+        <div><label style={labelStyle}>Branch</label><input style={inputStyle} value={branch} onChange={e=>setBranch(e.target.value)} placeholder="Branch"/></div>
+      </div>
+      <label style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",border:`2px dashed ${C.gray300}`,borderRadius:10,padding:"36px 20px",cursor:"pointer",background:C.gray100}}>
+        <div style={{fontSize:36}}>📎</div><div style={{fontWeight:800,color:C.dark,marginTop:8}}>Select multiple documents</div><div style={{fontSize:12,color:C.gray500,marginTop:4}}>Sanction Letter · Aadhaar · PAN · Index 2 · JPG / JPEG / PDF</div>
+        <input type="file" multiple accept=".pdf,.jpg,.jpeg" style={{display:"none"}} onChange={e=>addFiles(e.target.files)}/>
+      </label>
+      {files.length>0 && <div style={{marginTop:18}}>{files.map((f,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",padding:"10px 12px",borderBottom:`1px solid ${C.gray100}`}}><span>📄 {f.name}</span><button onClick={()=>setFiles(prev=>prev.filter((_,j)=>j!==i))} style={{border:"none",background:"transparent",color:C.red,cursor:"pointer"}}>Remove</button></div>)}</div>}
+      <button onClick={submit} disabled={submitting} style={{marginTop:18,width:"100%",padding:13,background:submitting?C.gray300:C.gold,color:submitting?C.gray500:C.dark,border:"none",borderRadius:8,fontWeight:800,cursor:submitting?"not-allowed":"pointer"}}>{submitting?"Uploading…":"Submit & Create Case ID"}</button>
+    </div>
+  </div>;
+}
+
+// ─── RECEIVED DOCUMENTS (ADMIN / EMPLOYEE ONLY) ──────────────────────────────
+function ReceivedDocumentsPage({ session, setPage, setActiveCaseData }) {
+  const [items, setItems] = useState(DB.get("received_documents"));
+  const refresh = () => setItems(DB.get("received_documents"));
+  const exportToAI = item => {
+    const sameCase = DB.get("received_documents").filter(x => x.caseId === item.caseId);
+    sessionStorage.setItem("ark_ai_imports", JSON.stringify(sameCase.map(x=>({caseId:x.caseId,fileName:x.fileName,mimeType:x.mimeType,size:x.size,dataUrl:x.dataUrl}))));
+    const c=DB.get("cases").find(x=>x.caseId===item.caseId); if(c) setActiveCaseData?.(c.storeData || {caseId:c.caseId,applicantName:c.applicantName,branch:c.branch});
+    DB.set("received_documents", DB.get("received_documents").map(x=>x.caseId===item.caseId?{...x,aiExported:true}:x));
+    setPage("aiDocuments");
+  };
+  return <div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}><div><h2 style={{fontWeight:800,fontSize:22,color:C.dark,margin:0}}>📥 Received Documents</h2><p style={{color:C.gray500,fontSize:13,margin:"5px 0 0"}}>Inbox of documents sent by Operations / Sales Manager.</p></div><button onClick={refresh} style={{background:C.white,border:`1px solid ${C.gray300}`,borderRadius:7,padding:"9px 14px",cursor:"pointer"}}>↻ Refresh</button></div>
+    {items.length===0?<div style={{background:C.white,border:`1px solid ${C.gray200}`,borderRadius:12,padding:50,textAlign:"center",color:C.gray500}}>📭 No documents received yet.</div>:<div style={{display:"grid",gap:12}}>{items.slice().reverse().map(x=><div key={x.id} style={{background:C.white,border:`1px solid ${C.gray200}`,borderRadius:12,padding:16}}><div style={{display:"flex",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}><div><div style={{fontWeight:800,color:C.gold}}>Case {x.caseId}</div><div style={{fontSize:13,color:C.dark,marginTop:4}}>📄 {x.fileName}</div><div style={{fontSize:11,color:C.gray500,marginTop:4}}>From: {x.senderName} · {x.senderRole} · {new Date(x.uploadedAt).toLocaleString("en-IN")}</div></div><div style={{display:"flex",gap:8}}><button onClick={()=>downloadDataUrl(x.dataUrl,x.fileName)} style={{background:C.white,border:`1px solid ${C.gray300}`,borderRadius:7,padding:"8px 11px",cursor:"pointer"}}>⬇️ Download</button><button onClick={()=>exportToAI(x)} style={{background:C.gold,color:C.dark,border:"none",borderRadius:7,padding:"8px 11px",fontWeight:800,cursor:"pointer"}}>🤖 Export to AI</button></div></div></div>)}</div>}
+  </div>;
+}
+
+// ─── ALL DOCUMENTS (ALL ROLES) ───────────────────────────────────────────────
+function AllDocumentsPage({ session }) {
+  const cases=getVisibleCases(session);
+  const [caseId,setCaseId]=useState("");
+  const [search,setSearch]=useState("");
+  const [files,setFiles]=useState({});
+  const [message,setMessage]=useState("");
+  const matchedCases=cases.filter(c=>{const q=search.trim().toLowerCase(); return !q || String(c.caseId||"").toLowerCase().includes(q) || String(c.applicantName||"").toLowerCase().includes(q);});
+  const selected=cases.find(c=>c.caseId===caseId);
+  const upload=async type=>{const file=files[type]; if(!selected||!file){setMessage("Select a Case ID and a file first.");return;} const dataUrl=await fileToDataUrl(file); DB.insert("case_documents",{id:`doc_${Date.now()}_${Math.random()}`,caseId,type,fileName:file.name,mimeType:file.type,size:file.size,dataUrl,uploadedBy:session?.id,uploadedByName:session?.name||session?.username,uploadedAt:new Date().toISOString()}); syncCaseStatus(caseId); setMessage(`${DOC_TYPES[type].label} uploaded for ${caseId}.`); setFiles(p=>({...p,[type]:null}));};
+  const docRows=caseId?caseDocuments(caseId):[];
+  const findDoc=type=>docRows.find(d=>d.type===type);
+  const downloadType=type=>{const d=findDoc(type); if(d?.dataUrl) downloadDataUrl(d.dataUrl,d.fileName);};
+  return <div><h2 style={{fontWeight:800,fontSize:22,color:C.dark,margin:"0 0 5px"}}>📂 All Documents</h2><p style={{color:C.gray500,fontSize:14,margin:"0 0 20px"}}>Search the Case ID created during extraction, then upload the documents generated later.</p>
+    <div style={{background:C.white,border:`1px solid ${C.gray200}`,borderRadius:12,padding:20}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}><div><label style={labelStyle}>Search Case ID / Applicant Name</label><input style={inputStyle} value={search} onChange={e=>setSearch(e.target.value)} placeholder="e.g. ARK-2026-000001 or applicant name"/></div><div><label style={labelStyle}>Case ID</label><select style={inputStyle} value={caseId} onChange={e=>setCaseId(e.target.value)}><option value="">Select a case…</option>{matchedCases.map(c=><option key={c.caseId} value={c.caseId}>{c.caseId} — {c.applicantName||"Applicant"}</option>)}</select></div></div>
+      {selected && <><div style={{marginTop:16,padding:12,background:C.gray100,borderRadius:8}}><strong>Case ID:</strong> {selected.caseId} &nbsp; | &nbsp; <strong>Applicant:</strong> {selected.applicantName||"—"}</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginTop:18}}>
+          {["SDR","SD","RF","INDEX2","NOI_RECEIPT","NOI"].map(type=><div key={type} style={{border:`1px solid ${C.gray200}`,borderRadius:10,padding:14}}><div style={{fontWeight:800,color:C.dark,marginBottom:8}}>{DOC_TYPES[type].icon} {DOC_TYPES[type].label}</div><input type="file" accept=".pdf,.jpg,.jpeg" onChange={e=>setFiles(p=>({...p,[type]:e.target.files?.[0]||null}))}/><button onClick={()=>upload(type)} style={{marginTop:9,background:C.gold,color:C.dark,border:"none",borderRadius:6,padding:"7px 11px",fontWeight:700,cursor:"pointer"}}>Upload</button></div>)}
+        </div>
+        <div style={{marginTop:22}}><SectionTitle>Available Downloads</SectionTitle><div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>{[["SDR","SDR"],["SD","SD"],["RF","RF"],["INDEX2","Index 2"],["NOI_RECEIPT","NOI Receipt"]].map(([type,label])=>{const d=findDoc(type); return <button key={type} disabled={!d} onClick={()=>downloadType(type)} style={{padding:10,border:`1px solid ${C.gray300}`,borderRadius:7,background:C.white,textAlign:"left",cursor:d?"pointer":"not-allowed",opacity:d?1:.5}}>⬇️ {label} {d?`— ${d.fileName}`:"— Not uploaded"}</button>})}</div></div>
+      </>}
+      {message&&<div style={{marginTop:14,background:C.greenBg,color:C.green,padding:10,borderRadius:7,fontWeight:700}}>{message}</div>}
+    </div></div>;
+}
 function PaymentTracking() {
   return (
     <div>
@@ -2579,50 +2742,26 @@ function PaymentTracking() {
 export default function App() {
   const [session, setSession] = useState(null);
   const [page, setPage] = useState("dashboard");
-  // activeCaseData: the current working case shared across all pages
-  const [activeCaseData, setActiveCaseDataRaw] = useState(() => {
-    try { return JSON.parse(sessionStorage.getItem("ark_active_case") || "null"); } catch { return null; }
-  });
-
-  const setActiveCaseData = (data) => {
-    setActiveCaseDataRaw(data);
-    try { sessionStorage.setItem("ark_active_case", JSON.stringify(data)); } catch {}
-    // Also persist to DB if case exists
-    if (data?.caseId) {
-      const rec = DB.get("cases").find(c => c.caseId === data.caseId);
-      if (rec) DB.update("cases", rec.id, { storeData: data });
-    }
-  };
-
-  const mergeActiveCaseData = (patch) => setActiveCaseData({ ...(activeCaseData || {}), ...patch });
-
-  const handleLogout = () => {
-    if (session) { DB.audit("LOGOUT", session.id, { username: session.username }); DB.session = null; }
-    sessionStorage.removeItem("ark_active_case");
-    setSession(null);
-    setActiveCaseDataRaw(null);
-  };
-
-  if (!session) return <LoginPage onLogin={(user) => { setSession(user); setPage("dashboard"); }} />;
-
+  const [activeCaseData, setActiveCaseDataRaw] = useState(() => { try { return JSON.parse(sessionStorage.getItem("ark_active_case") || "null"); } catch { return null; } });
+  const setActiveCaseData = data => { setActiveCaseDataRaw(data); try { sessionStorage.setItem("ark_active_case", JSON.stringify(data)); } catch {} };
+  const mergeActiveCaseData = patch => setActiveCaseData({ ...(activeCaseData || {}), ...patch });
+  const handleLogout = () => { if(session) DB.audit("LOGOUT",session.id,{username:session.username}); DB.session=null; sessionStorage.removeItem("ark_active_case"); setSession(null); setActiveCaseDataRaw(null); setPage("dashboard"); };
+  if (!session) return <LoginPage onLogin={user => { setSession(user); setPage("dashboard"); }} />;
+  const restricted = ["Operations","Sales Manager"].includes(session.role);
   const pages = {
-    dashboard: <Dashboard setPage={setPage} session={session} activeCaseData={activeCaseData} setActiveCaseData={setActiveCaseData} />,
-    cases: <Cases setPage={setPage} setActiveCaseData={setActiveCaseData} />,
-    calculator: <Calculator />,
-    documents: <DocumentUpload session={session} activeCaseData={activeCaseData} mergeActiveCaseData={mergeActiveCaseData} setPage={setPage} />,
-    challan: <Challan session={session} activeCaseData={activeCaseData} mergeActiveCaseData={mergeActiveCaseData} setActiveCaseData={setActiveCaseData} />,
-    noi: <NOI session={session} activeCaseData={activeCaseData} mergeActiveCaseData={mergeActiveCaseData} />,
-    mis: <MIS session={session} activeCaseData={activeCaseData} />,
-    payment: <PaymentTracking />,
-    admin: session.role === "Admin" ? <AdminPanel session={session} /> : <Dashboard setPage={setPage} session={session} />,
+    dashboard:<Dashboard setPage={setPage} session={session}/>,
+    cases:<Cases setPage={setPage} session={session} setActiveCaseData={setActiveCaseData}/>,
+    calculator:<Calculator/>,
+    uploadDocuments:<UploadDocumentsPage session={session} setActiveCaseData={setActiveCaseData} setPage={setPage}/>,
+    allDocuments:<AllDocumentsPage session={session}/>,
+    receivedDocuments:!restricted?<ReceivedDocumentsPage session={session} setPage={setPage} setActiveCaseData={setActiveCaseData}/>:<Dashboard setPage={setPage} session={session}/>,
+    aiDocuments:!restricted?<DocumentUpload session={session} activeCaseData={activeCaseData} mergeActiveCaseData={mergeActiveCaseData} setPage={setPage}/>:<Dashboard setPage={setPage} session={session}/>,
+    challan:!restricted?<Challan session={session} activeCaseData={activeCaseData} mergeActiveCaseData={mergeActiveCaseData} setActiveCaseData={setActiveCaseData}/>:<Dashboard setPage={setPage} session={session}/>,
+    noi:!restricted?<NOI session={session} activeCaseData={activeCaseData} mergeActiveCaseData={mergeActiveCaseData}/>:<Dashboard setPage={setPage} session={session}/>,
+    mis:<MIS session={session} activeCaseData={activeCaseData}/>,
+    payment:<PaymentTracking/>,
+    admin:session.role==="Admin"?<AdminPanel session={session}/>:<Dashboard setPage={setPage} session={session}/>,
   };
-
-  return (
-    <div style={{ display: "flex", minHeight: "100vh", fontFamily: "'Inter','Segoe UI',sans-serif", background: C.pageBg }}>
-      <Sidebar active={page} setPage={setPage} session={session} onLogout={handleLogout} />
-      <div style={{ flex: 1, padding: "32px 36px", overflowY: "auto", minWidth: 0 }}>
-        {pages[page] || <Dashboard setPage={setPage} session={session} />}
-      </div>
-    </div>
-  );
+  return <div style={{display:"flex",minHeight:"100vh",fontFamily:"'Inter','Segoe UI',sans-serif",background:C.pageBg}}><Sidebar active={page} setPage={setPage} session={session} onLogout={handleLogout}/><div style={{flex:1,padding:"32px 36px",overflowY:"auto",minWidth:0}}>{pages[page]||pages.dashboard}</div></div>;
 }
+
