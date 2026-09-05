@@ -459,8 +459,8 @@ function LoginPage({ onLogin }) {
           <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 40 }}>
             <div style={{ width: 52, height: 52, borderRadius: 14, background: C.gold, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🏦</div>
             <div>
-              <div style={{ color: C.gold, fontWeight: 900, fontSize: 22, letterSpacing: 0.5 }}>BankConnect Pro</div>
-              <div style={{ color: C.gray400, fontSize: 12, letterSpacing: 1 }}>ARSKFIL SERVICES LLP</div>
+              <div style={{ color: C.gold, fontWeight: 900, fontSize: 22, letterSpacing: 0.5 }}> ARSKFIL SERVICES LLP</div>
+              <div style={{ color: C.gray400, fontSize: 12, letterSpacing: 1 }}>powered by श्री दिनेश एंटरप्राइजेज</div>
             </div>
           </div>
           <h1 style={{ color: C.white, fontWeight: 900, fontSize: 38, lineHeight: 1.15, margin: "0 0 12px" }}>
