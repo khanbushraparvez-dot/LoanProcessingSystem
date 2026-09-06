@@ -143,7 +143,7 @@ ensureCaseDocumentStore();
 (async () => {
   if (!DB.get("users").length) {
     const hash = await DB.hashPassword("ASK@2026");
-    DB.insert("users", { id: "admin_1", username: "admin", email: "admin@arskfil.com", passwordHash: hash, role: "Admin", branch: "HQ", active: true, createdAt: new Date().toISOString(), createdBy: "system" });
+    DB.insert("users", { id: "admin_1", username: "admin", email: "admin@arskeil.com", passwordHash: hash, role: "Admin", branch: "HQ", active: true, createdAt: new Date().toISOString(), createdBy: "system" });
   }
 })();
 
@@ -459,7 +459,7 @@ function LoginPage({ onLogin }) {
           <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 40 }}>
             <div style={{ width: 52, height: 52, borderRadius: 14, background: C.gold, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🏦</div>
             <div>
-              <div style={{ color: C.gold, fontWeight: 900, fontSize: 22, letterSpacing: 0.5 }}> ARSKFIL SERVICES LLP</div>
+              <div style={{ color: C.gold, fontWeight: 900, fontSize: 22, letterSpacing: 0.5 }}> ARSKEIL SERVICES LLP</div>
               <div style={{ color: C.gray400, fontSize: 12, letterSpacing: 1 }}>powered by श्री दिनेश एंटरप्राइजेज</div>
             </div>
           </div>
